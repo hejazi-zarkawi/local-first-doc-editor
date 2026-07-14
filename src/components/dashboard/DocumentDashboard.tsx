@@ -6,6 +6,8 @@ import { useRouter } from "next/navigation";
 import { formatDistanceToNow } from "date-fns";
 import { Clock3, FilePlus2, FileText, FolderOpen, LoaderCircle, Plus, Search, Sparkles } from "lucide-react";
 
+import { signOut } from "next-auth/react";
+import { LogOut, User } from "lucide-react";
 type DocumentItem = {
   id: string;
   title: string;
@@ -68,10 +70,34 @@ export function DocumentDashboard({
             </button>
           </div>
 
-          <div className="mt-auto flex items-center gap-2 rounded-lg px-2 py-2">
+          {/* <div className="mt-auto flex items-center gap-2 rounded-lg px-2 py-2">
             <span className="grid h-8 w-8 place-items-center rounded-full bg-[#d9eadd] text-xs font-semibold text-[#35623f]">{initials}</span>
             <div className="min-w-0"><p className="truncate text-sm font-medium">{displayName}</p><p className="truncate text-xs text-[#8a8984]">Personal workspace</p></div>
-          </div>
+          </div> */}
+         <div className="mt-auto border-t border-[#dfdfdc] pt-4">
+  <div className="flex items-center gap-2 rounded-lg px-2 py-2">
+    <span className="grid h-8 w-8 place-items-center rounded-full bg-[#d9eadd] text-xs font-semibold text-[#35623f]">
+      {initials}
+    </span>
+
+    <div className="min-w-0">
+      <p className="truncate text-sm font-medium">
+        {displayName}
+      </p>
+
+      <p className="truncate text-xs text-[#8a8984]">
+        Personal workspace
+      </p>
+    </div>
+  </div>
+
+  <button
+    onClick={() => signOut({ callbackUrl: "/login" })}
+    className="mt-3 flex w-full items-center justify-center rounded-md border border-red-200 px-3 py-2 text-sm font-medium text-red-600 transition hover:bg-red-50"
+  >
+    Logout
+  </button>
+</div>
         </aside>
 
         <section className="min-w-0 flex-1 px-5 py-6 sm:px-8 sm:py-9 lg:px-12">
