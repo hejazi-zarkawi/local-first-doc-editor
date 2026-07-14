@@ -14,14 +14,14 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <footer className="border-t border-neutral-200 py-6 text-center text-xs text-neutral-500">
           Built by{" "}
           <a href="https://github.com/hejazi-zarkawi" className="underline" target="_blank" rel="noreferrer">
-            Heyzii
+            Mohammad Umar Al Hejazi
           </a>{" "}
           ·{" "}
           <a href="https://github.com/hejazi-zarkawi/local-first-doc-editor" className="underline" target="_blank" rel="noreferrer">
             GitHub
           </a>{" "}
           ·{" "}
-          <a href="https://www.linkedin.com/in/hejazi-zarkawi" className="underline" target="_blank" rel="noreferrer">
+          <a href="https://www.linkedin.com/in/mohammad-umar-al-hejazi/" className="underline" target="_blank" rel="noreferrer">
             LinkedIn
           </a>
         </footer>

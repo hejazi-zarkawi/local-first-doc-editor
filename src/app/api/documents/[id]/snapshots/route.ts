@@ -11,12 +11,17 @@ const RestoreSnapshotSchema = z.object({ snapshotId: z.string().cuid() });
 export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id: documentId } = await params;
   const session = await auth();
+  const userId = session?.user?.id;
+
+if (!userId) {
+  return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+}
   if (!session?.user?.id) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const role = await getDocumentRole(session.user.id, documentId);
+  const role = await getDocumentRole(userId, documentId);
   if (!role) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
 
-  const snapshots = await withUserContext(session.user.id, (tx) =>
+  const snapshots = await withUserContext(userId, (tx) =>
     tx.snapshot.findMany({
       where: { documentId },
       orderBy: { createdAt: "desc" },
@@ -31,9 +36,14 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id: documentId } = await params;
   const session = await auth();
+  const userId = session?.user?.id;
+
+if (!userId) {
+  return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+}
   if (!session?.user?.id) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const role = await getDocumentRole(session.user.id, documentId);
+  const role = await getDocumentRole(userId, documentId);
   if (!role || role === "VIEWER") {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
@@ -41,13 +51,13 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   const parsed = CreateSnapshotSchema.safeParse(await req.json().catch(() => ({})));
   if (!parsed.success) return NextResponse.json({ error: "Invalid body" }, { status: 400 });
 
-  const snapshot = await withUserContext(session.user.id, async (tx) => {
+  const snapshot = await withUserContext(userId, async (tx) => {
     const doc = await tx.document.findUniqueOrThrow({ where: { id: documentId } });
     if (!doc.state) throw new Error("Document has no state yet");
     return tx.snapshot.create({
       data: {
         documentId,
-        authorId: session.user!.id,
+        authorId: userId,
         label: parsed.data.label,
         state: doc.state,
       },
@@ -74,9 +84,14 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
 export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id: documentId } = await params;
   const session = await auth();
+  const userId = session?.user?.id;
+
+if (!userId) {
+  return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+}
   if (!session?.user?.id) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const role = await getDocumentRole(session.user.id, documentId);
+  const role = await getDocumentRole(userId, documentId);
   if (!role || role === "VIEWER") {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
@@ -84,7 +99,7 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: 
   const parsed = RestoreSnapshotSchema.safeParse(await req.json().catch(() => null));
   if (!parsed.success) return NextResponse.json({ error: "Invalid body" }, { status: 400 });
 
-  const result = await withUserContext(session.user.id, async (tx) => {
+  const result = await withUserContext(userId, async (tx) => {
     const [doc, targetSnapshot] = await Promise.all([
       tx.document.findUniqueOrThrow({ where: { id: documentId } }),
       tx.snapshot.findUniqueOrThrow({ where: { id: parsed.data.snapshotId } }),
@@ -112,7 +127,7 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: 
     await tx.syncOp.create({
       data: {
         documentId,
-        authorId: session.user!.id,
+        authorId: userId,
         update: Buffer.from(forwardDiff),
         byteSize: forwardDiff.byteLength,
       },
@@ -126,7 +141,7 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: 
     const restoreSnapshot = await tx.snapshot.create({
       data: {
         documentId,
-        authorId: session.user!.id,
+        authorId: userId,
         label: `Restored from "${targetSnapshot.label ?? targetSnapshot.id}"`,
         state: Buffer.from(newState),
       },

@@ -17,6 +17,7 @@ const PROMPTS = {
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id: documentId } = await params;
   const session = await auth();
+  
   if (!session?.user?.id) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const role = await getDocumentRole(session.user.id, documentId);
