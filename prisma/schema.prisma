@@ -1,0 +1,105 @@
+// Prisma schema for the Local-First Collaborative Document Editor
+// PostgreSQL with Row Level Security (RLS) policies applied via migration SQL
+// (see prisma/migrations/*_enable_rls/migration.sql)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  OWNER
+  EDITOR
+  VIEWER
+}
+
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String    @unique
+  passwordHash  String?
+  emailVerified DateTime?
+  image         String?
+  createdAt     DateTime  @default(now())
+
+  memberships   DocumentMember[]
+  snapshots     Snapshot[]
+  syncOpsAuthored SyncOp[]
+}
+
+// A Document is the top-level collaborative object. The authoritative Yjs
+// state lives as a binary blob (`state`) that is the merge of all applied
+// updates. Individual updates are also retained in SyncOp for audit /
+// replay / debugging, but state is what's loaded on document open.
+model Document {
+  id          String   @id @default(cuid())
+  title       String   @default("Untitled Document")
+  ownerId     String
+  state       Bytes?   // latest merged Yjs binary state (Y.encodeStateAsUpdate)
+  stateVector Bytes?   // latest Yjs state vector, used for diff-based sync
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  members     DocumentMember[]
+  snapshots   Snapshot[]
+  syncOps     SyncOp[]
+
+  @@index([ownerId])
+}
+
+// Join table encoding per-user role on a document. This is what RLS
+// policies and Prisma-level scoping both check against.
+model DocumentMember {
+  id         String   @id @default(cuid())
+  documentId String
+  userId     String
+  role       Role     @default(VIEWER)
+  createdAt  DateTime @default(now())
+
+  document   Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([documentId, userId])
+  @@index([userId])
+}
+
+// Every accepted incremental Yjs update is stored here. This gives us:
+//   1. An append-only audit log independent of the merged `state` blob
+//   2. The ability to replay/rebuild state if the merged blob is ever suspect
+//   3. A cursor (`seq`) clients use to fetch only updates they're missing
+model SyncOp {
+  id         String   @id @default(cuid())
+  documentId String
+  authorId   String
+  seq        BigInt   @default(autoincrement())
+  update     Bytes    // Y.Update binary payload (validated + size-capped, see lib/sync/validate.ts)
+  byteSize   Int
+  createdAt  DateTime @default(now())
+
+  document   Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  author     User     @relation(fields: [authorId], references: [id])
+
+  @@index([documentId, seq])
+}
+
+// Named/point-in-time snapshots for the "time travel" version history
+// feature. Restoring a snapshot creates a NEW snapshot + a new SyncOp that
+// moves the document forward, rather than mutating history in place -
+// this is what keeps concurrent collaborators' state consistent.
+model Snapshot {
+  id         String   @id @default(cuid())
+  documentId String
+  authorId   String
+  label      String?
+  state      Bytes    // full Yjs state at time of snapshot
+  createdAt  DateTime @default(now())
+
+  document   Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  author     User     @relation(fields: [authorId], references: [id])
+
+  @@index([documentId, createdAt])
+}
