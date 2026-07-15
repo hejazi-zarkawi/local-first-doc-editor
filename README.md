@@ -147,6 +147,11 @@ This allows the same user to have different permissions across different documen
 
 Authorization checks protect synchronization and document operations so that read-only users cannot submit document modifications.
 
+Demo accounts (from `npm run seed`), all with password `password123`:
+- `owner@example.com` — Owner on the seeded document
+- `editor@example.com` — Editor
+- `viewer@example.com` — Viewer (read-only, cannot push edits)
+
 ---
 
 ## Sync Payload Protection
