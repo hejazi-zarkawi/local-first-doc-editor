@@ -1,158 +1,406 @@
 # Local-First Collaborative Document Editor
 
-A collaborative document editor that works fully offline, reconciles state automatically when the network returns, resolves concurrent edits deterministically, and lets users navigate a full version history — built for the House of Edtech Fullstack Developer Assignment 2 (v2.1, April 2026).
+A production-oriented collaborative document editor designed around **local-first principles**. Users can continue editing documents while offline, persist changes locally, automatically synchronize when connectivity returns, and safely reconcile concurrent edits using conflict-free replicated data types (CRDTs).
 
-**Live app:** _add your Vercel URL here after deploying_
-**Repo:** https://github.com/hejazi-zarkawi/local-first-doc-editor
+**Live Application:** [https://local-first-doc-editor-seven.vercel.app/]
+
+**Repository:** [https://github.com/hejazi-zarkawi/local-first-doc-editor/]
 
 ---
 
-## Why this architecture
+## Overview
 
-### Local-first, not "offline-tolerant"
+Traditional collaborative editors are often server-first: users depend on an active network connection to load, edit, and save their work.
 
-Most "offline support" bolts a service worker cache onto a server-first app. This app inverts that: the **client's IndexedDB copy of the document is the primary source of truth**. Opening, editing, and closing a document never blocks on the network — there is no loading spinner waiting for a server response before you can type.
+This project explores a different architecture.
 
-This is done with **Yjs**, a CRDT (Conflict-free Replicated Data Type) library, plus `y-indexeddb` for local persistence. Every edit becomes a Yjs update, written to IndexedDB synchronously, and queued for the server in the background.
+The browser maintains a persistent local copy of document state using **IndexedDB**, allowing documents to remain editable even when the network is unavailable. Changes are represented using **Yjs CRDT updates**, persisted locally, and synchronized with the backend when connectivity is available.
 
-### Why a CRDT instead of Operational Transformation or last-write-wins
+The application also includes authentication, document-level role-based access control, version history, automated testing, and CI/CD.
 
-The assignment explicitly calls out "deterministic conflict resolution." Three approaches were considered:
+---
 
-| Approach | Problem |
+## Key Features
+
+- Local-first document editing
+- Offline editing with persistent local storage
+- Automatic synchronization after reconnecting
+- Deterministic conflict resolution using CRDTs
+- Multi-user collaborative document editing
+- Document-level Owner, Editor, and Viewer roles
+- Version history and snapshot restoration
+- Secure authentication and authorization
+- Payload validation and synchronization safeguards
+- Optional AI-assisted writing features
+- Unit and end-to-end testing
+- Automated CI/CD pipeline
+
+---
+
+## Architecture
+
+### Local-First Editing
+
+The application treats the browser's locally persisted document state as a core part of the architecture rather than adding offline support as an afterthought.
+
+**Yjs** manages the collaborative document state, while **y-indexeddb** persists the Yjs document locally in the browser.
+
+This allows users to:
+
+1. Open and edit locally available documents without depending on an active connection.
+2. Continue editing when connectivity is lost.
+3. Persist changes in the browser.
+4. Queue synchronization updates.
+5. Reconcile local and remote changes when connectivity returns.
+
+The result is an editing experience that remains usable even during temporary network failures.
+
+---
+
+## Conflict Resolution with CRDTs
+
+Collaborative systems need a strategy for resolving concurrent edits.
+
+Several common approaches exist:
+
+| Approach | Trade-off |
 |---|---|
-| Last-write-wins | Silently destroys concurrent edits — unacceptable for a document editor |
-| Operational Transformation (OT) | Requires a central server to sequence operations; doesn't fit true offline-first (two OT clients can't converge without seeing each other's ops in a guaranteed order) |
-| **CRDT (Yjs)** | Updates commute — applying A then B gives the same result as B then A. Any two replicas that have seen the same set of updates converge to an identical state, with no central coordinator required. |
+| Last-write-wins | Simple, but concurrent changes can be silently overwritten |
+| Operational Transformation | Effective for real-time collaboration but typically relies on coordinated operation ordering |
+| CRDT | Replicas can independently process changes and converge after receiving the same updates |
 
-CRDT convergence is verified directly in `tests/unit/crdt-merge.test.ts`.
+This project uses **Yjs**, a CRDT implementation designed for collaborative applications.
 
-### Why REST polling instead of WebSockets
+Yjs updates are designed to be merged regardless of the order in which they arrive, allowing independently edited document replicas to converge after synchronization.
 
-Real-time collaboration usually reaches for WebSockets. This app deliberately doesn't, because **Vercel serverless functions don't hold persistent connections** — a WebSocket server needs a long-lived process (a separate deployment target entirely, e.g. a small VM or a service like Pusher/Ably). Given the mandate to deploy on Vercel, the sync engine is instead:
+CRDT convergence and update idempotency are tested in:
 
-- A `POST /api/documents/:id/sync` endpoint that accepts a **batch** of queued Yjs updates
-- A `GET /api/documents/:id/sync?since=<seq>` endpoint that returns anything the client hasn't seen, using an append-only `SyncOp` sequence cursor
-- Client-side debounced flushing (800ms after the last local edit) so rapid typing coalesces into one request instead of one per keystroke
-
-The tradeoff: this is near-real-time (sub-second), not instant character-by-character like a WebSocket. For a document editor (vs. a cursor-tracking pair-programming tool) that tradeoff is the right one for a serverless deployment target — see "What I'd change for true real-time" below.
-
-### Race conditions this design handles
-
-- **Connection drops mid-push:** if a batch POST fails partway, the client never removes those updates from its local queue, so the next flush retries them. Yjs updates are idempotent under `Y.applyUpdate` — re-sending an update the server already merged is a no-op, not a duplicate or corruption risk (`tests/unit/crdt-merge.test.ts` covers this explicitly).
-- **Reconnect ordering:** on regaining connectivity, the client **pulls before it pushes** (`useLocalFirstDoc.ts`), so its next push merges against the server's latest known state rather than racing it blind.
-- **Concurrent offline editors restoring old versions:** restoring a snapshot doesn't overwrite `Document.state` — it computes a forward CRDT diff from current state to the snapshot's state and applies that diff as a normal update (`src/app/api/documents/[id]/snapshots/route.ts`). This means a restore composes correctly with whatever other collaborators are concurrently editing, instead of silently discarding their work — and the restore itself becomes a new entry in the timeline, not a rewrite of history.
-
-### Preventing a malformed/oversized payload from OOMing the server
-
-This was called out explicitly in the assignment's security section, and is handled in three cheap-to-expensive layers in `src/lib/sync/validate.ts`, checked in that order specifically so a malicious payload is rejected before the expensive step:
-
-1. **Raw `Content-Length` cap** (2MB) — rejected before the body is even read.
-2. **Per-update decoded byte-length cap** (1.5MB) — protects against base64 expansion tricks and payloads with many small-looking-but-actually-huge entries; batch size is also capped at 50 updates/request.
-3. **Structural validation** — every update is applied to a **throwaway** `Y.Doc`, never the real document, inside a `try/catch`. A forged or corrupted buffer throws and is rejected with a 422; it never has a chance to corrupt real document state, and the scratch doc is destroyed either way.
-
-All three are unit-tested in `tests/unit/validate.test.ts`.
-
-### Authentication, authorization, and tenant isolation
-
-- **NextAuth (Auth.js v5)**, credentials provider, JWT sessions.
-- Roles are **per-document**, not global: `DocumentMember` maps `(documentId, userId) → Role`. A user can be an Owner on one document and a Viewer on another.
-- **Viewers are blocked from pushing updates at two independent layers**: the application layer (`sync/route.ts` checks role before touching Yjs) and the database layer (Postgres Row Level Security policy `syncop_write` in `prisma/migrations/000_enable_rls/migration.sql` requires `role IN ('OWNER','EDITOR')` on `INSERT`). If a future code change ever forgets the app-layer check, the database still refuses the write.
-- **Tenant isolation** more broadly is enforced via RLS: every table scoped to a document checks `current_setting('app.current_user_id')` against `DocumentMember`. Since Prisma uses one pooled connection role rather than per-user DB roles, `src/lib/db.ts`'s `withUserContext()` sets that session variable inside a transaction for the duration of each request — so RLS applies per-request, not just per-connection.
+```text
+tests/unit/crdt-merge.test.ts
+```
 
 ---
 
-## Tech stack
+## Synchronization Strategy
 
-- **Next.js 16** (App Router, TypeScript, Server Components + Route Handlers)
-- **React 19**
-- **Tailwind CSS** for styling, minimal Radix primitives for accessible interactive elements
-- **PostgreSQL** + **Prisma** (schema in `prisma/schema.prisma`) + Row Level Security
-- **NextAuth (Auth.js v5)** — credentials auth, JWT sessions, role-based authorization
-- **Yjs** + `y-indexeddb` — CRDT engine and local persistence
-- **Zod** — runtime validation on every API boundary
-- **AI SDK** + **Groq** (`llama-3.3-70b-versatile`) — optional AI add-on (summarize / continue writing)
-- **Vitest** — unit tests (CRDT convergence, payload validation)
-- **Playwright** — e2e tests (offline editing flow, role enforcement)
-- **GitHub Actions** — CI (lint, test, build) → Vercel deploy on merge to `main`
+The deployed application uses an HTTP-based synchronization mechanism.
+
+Local updates are queued and synchronized with the backend using dedicated sync endpoints. The client periodically exchanges Yjs updates with the server and merges remote changes into its local document state.
+
+The synchronization flow can be summarized as:
+
+```text
+User edits document
+        ↓
+Yjs updates local document state
+        ↓
+Changes persist in IndexedDB
+        ↓
+Updates enter the synchronization queue
+        ↓
+Client sends queued updates to the server
+        ↓
+Server merges and stores document state
+        ↓
+Other clients retrieve unseen updates
+        ↓
+Yjs merges updates deterministically
+```
+
+Updates are batched and flushed after a short debounce period to avoid sending a network request for every individual keystroke.
 
 ---
 
-## Getting started locally
+## Offline and Reconnection Handling
+
+The synchronization layer is designed to handle temporary network failures.
+
+If synchronization fails, pending updates remain available locally and can be retried later.
+
+When connectivity returns, the application reconciles local and server-side document state through the synchronization process.
+
+Because Yjs updates are designed to be idempotent, receiving the same update more than once does not result in duplicated document content.
+
+---
+
+## Version History
+
+The application supports document snapshots that allow users to navigate previous versions of a document.
+
+Restoring a historical version is handled as a new state transition rather than simply rewriting the document's history. This preserves the collaborative nature of the document while allowing previous states to be restored.
+
+---
+
+## Authentication and Authorization
+
+Authentication is implemented using **Auth.js / NextAuth** with JWT-based sessions.
+
+Authorization is enforced at the document level through three roles:
+
+- **Owner** — full document access
+- **Editor** — can view and modify document content
+- **Viewer** — read-only access
+
+This allows the same user to have different permissions across different documents.
+
+Authorization checks protect synchronization and document operations so that read-only users cannot submit document modifications.
+
+---
+
+## Sync Payload Protection
+
+Synchronization endpoints validate incoming updates before they are applied to document state.
+
+The application includes safeguards for:
+
+- Oversized request payloads
+- Excessively large individual updates
+- Oversized update batches
+- Malformed CRDT updates
+
+Potentially invalid Yjs updates are validated before being applied to the actual document state.
+
+Related validation tests are located in:
+
+```text
+tests/unit/validate.test.ts
+```
+
+---
+
+## Tech Stack
+
+### Frontend
+
+- Next.js
+- React
+- TypeScript
+- Tailwind CSS
+- Radix UI
+
+### Local-First Collaboration
+
+- Yjs
+- y-indexeddb
+
+### Backend
+
+- Next.js Route Handlers
+- PostgreSQL
+- Prisma ORM
+
+### Authentication
+
+- Auth.js / NextAuth
+- JWT sessions
+
+### Validation
+
+- Zod
+
+### AI Integration
+
+- AI SDK
+- Groq
+
+### Testing
+
+- Vitest
+- Playwright
+
+### DevOps
+
+- GitHub Actions
+- Vercel
+
+---
+
+## Project Structure
+
+```text
+local-first-doc-editor/
+│
+├── .github/
+│   └── workflows/          # CI/CD workflows
+│
+├── prisma/                 # Database schema and migrations
+│
+├── src/                    # Application source code
+│
+├── tests/                  # Unit and end-to-end tests
+│
+├── .env.example            # Environment variable template
+├── next.config.ts          # Next.js configuration
+├── package.json            # Dependencies and scripts
+├── playwright.config.ts    # End-to-end test configuration
+├── tailwind.config.ts      # Tailwind CSS configuration
+├── tsconfig.json           # TypeScript configuration
+└── vitest.config.ts        # Unit test configuration
+```
+
+---
+
+## Getting Started
 
 ### Prerequisites
-- Node.js 22+
-- A PostgreSQL database (local via Docker, or a free hosted instance from [Neon](https://neon.tech) or [Supabase](https://supabase.com) — both work well with Vercel)
 
-### Setup
+Make sure you have:
+
+- Node.js 22 or later
+- PostgreSQL
+- npm
+
+### Installation
+
+Clone the repository:
 
 ```bash
-git clone https://github.com/hejazi-zarkawi/local-first-doc-editor.git
+git clone <your-repository-url>
 cd local-first-doc-editor
-npm install
-cp .env.example .env
-# edit .env: set DATABASE_URL, generate NEXTAUTH_SECRET with `openssl rand -base64 32`
-
-npm run prisma:migrate   # creates tables + applies RLS policies
-npm run seed              # creates 3 demo users (owner/editor/viewer) + 1 shared doc
-
-npm run dev                # http://localhost:3000
 ```
 
-Demo accounts (from `npm run seed`), all with password `password123`:
-- `owner@example.com` — Owner on the seeded document
-- `editor@example.com` — Editor
-- `viewer@example.com` — Viewer (read-only, cannot push edits)
-
-### Testing offline behavior locally
-Open the app, sign in, open a document, then in DevTools → Network tab, switch to "Offline." Keep typing — the textarea keeps working and the status badge switches to "Offline — saving locally." Switch back to "Online" and watch it flush the queued edits and switch to "All changes synced."
-
-### Running tests
+Install dependencies:
 
 ```bash
-npm run test          # unit tests: CRDT convergence + payload validation
-npm run test:e2e       # e2e: requires `npm run dev` running + a seeded DB
+npm install
+```
+
+Create your local environment configuration:
+
+```bash
+cp .env.example .env
+```
+
+Configure the required environment variables in `.env`.
+
+Run the database migrations:
+
+```bash
+npm run prisma:migrate
+```
+
+Seed the development database if required:
+
+```bash
+npm run seed
+```
+
+Start the development server:
+
+```bash
+npm run dev
+```
+
+The application will be available locally at:
+
+```text
+http://localhost:3000
 ```
 
 ---
 
-## Deployment (Vercel)
+## Running Tests
 
-1. Push this repo to GitHub (done — see below).
-2. In Vercel: **New Project → Import** this repo.
-3. Add environment variables in the Vercel project settings: `DATABASE_URL`, `NEXTAUTH_SECRET`, `NEXTAUTH_URL` (your production URL), and optionally `GROQ_API_KEY`.
-4. Vercel auto-detects Next.js; the build command (`npm run build`) already runs `prisma generate` first.
-5. Run `npx prisma migrate deploy` once against your production database (from your machine, pointed at the prod `DATABASE_URL`) to create tables and apply RLS policies before first use.
-6. For the CI → auto-deploy workflow in `.github/workflows/ci.yml` to work, add `VERCEL_TOKEN`, `VERCEL_ORG_ID`, and `VERCEL_PROJECT_ID` as GitHub repo secrets (found via `vercel link` + Vercel account settings). This step is optional — you can also just let Vercel's own GitHub integration auto-deploy on push, without the Actions job.
+Run unit tests:
 
----
+```bash
+npm run test
+```
 
-## Addressing the evaluation criteria directly
+Run end-to-end tests:
 
-- **Functionality:** offline editing, queued sync with retry, CRDT merge, snapshot-based version history with non-destructive restore, Zod validation on every write endpoint, role-based auth — see route handlers under `src/app/api/`.
-- **UI:** connection-status indicator (`SyncStatusBadge`), responsive layout, `aria-live` status region, visible focus rings, `prefers-reduced-motion` respected (`globals.css`).
-- **Code quality:** sync engine and merge logic isolated in `src/lib/sync/`; every non-obvious decision has an inline comment explaining *why*, not just *what*.
-- **Testing:** `tests/unit/crdt-merge.test.ts` proves order-independent convergence and update idempotency; `tests/unit/validate.test.ts` proves the OOM/malformed-payload defenses; `tests/e2e/offline-sync.spec.ts` proves the offline-edit-then-reconnect flow and viewer read-only enforcement end-to-end.
-- **Deployment:** GitHub Actions CI (lint → test → build) gates every merge to `main`; optional auto-deploy to Vercel on top of that.
-- **Real-world considerations:** see "Scaling considerations" below for how this handles document growth over time.
+```bash
+npm run test:e2e
+```
+
+The test suite covers critical application behavior including CRDT convergence, synchronization validation, offline editing, and role-based access restrictions.
 
 ---
 
-## Scaling considerations (document state size over time)
+## Testing Offline Editing
 
-`Document.state` stores the full merged Yjs binary state, which grows with edit history if left unmanaged (Yjs updates accumulate deletion tombstones). Two mitigations, noted here rather than fully implemented given assignment scope:
+To test the local-first workflow:
 
-1. **Periodic GC via `Y.transact` + Yjs's built-in garbage collection** of tombstoned content, run on a schedule (e.g. a Vercel Cron function) rather than per-request, so it never adds latency to the sync path.
-2. **`SyncOp` retention policy** — the append-only op log is valuable for audit/replay but unbounded growth is a real cost; a production version would archive ops older than N days to cold storage once they're reflected in a `Snapshot`, since snapshots already capture full state at a point in time and don't need the intervening ops to reconstruct anything.
+1. Sign in to the application.
+2. Open a document.
+3. Open browser developer tools.
+4. Navigate to the **Network** tab.
+5. Change the network state to **Offline**.
+6. Continue editing the document.
+7. Restore the network connection.
 
-## What I'd change for true real-time character-level sync
+Changes made while offline remain available locally and are synchronized when connectivity returns.
 
-If the deployment target weren't constrained to Vercel serverless, I'd swap the REST polling relay for a WebSocket-based Yjs provider (`y-websocket`) backed by a small always-on Node process (e.g. Fly.io or a Railway worker), which would drop latency from ~800ms-debounced to effectively instant, and enable live cursor/selection presence — which REST polling can't do well.
+---
+
+## Deployment
+
+The application is deployed using **Vercel**, with PostgreSQL used for persistent server-side storage.
+
+The production environment requires the appropriate database, authentication, and optional AI integration environment variables.
+
+The repository also includes a GitHub Actions workflow for automated validation of code changes.
+
+---
+
+## Scaling Considerations
+
+The current architecture stores merged Yjs document state and maintains synchronization operations.
+
+For a larger production deployment, potential improvements include:
+
+- Periodic compaction and garbage collection of document state
+- Archiving older synchronization operations
+- Background processing for maintenance tasks
+- Dedicated real-time infrastructure
+- Horizontal scaling of synchronization services
+- Monitoring and observability for synchronization failures
+
+---
+
+## Future Improvements
+
+A future version could introduce a dedicated WebSocket collaboration service for lower-latency synchronization and presence features.
+
+Potential additions include:
+
+- Real-time cursor presence
+- Live collaborator indicators
+- Selection awareness
+- Document comments
+- Sharing through invitations
+- Advanced document permissions
+- Audit logs
+- Improved synchronization observability
+
+A dedicated long-running collaboration service could use a WebSocket-based Yjs provider while keeping the main application deployed independently.
+
+---
+
+## What I Learned
+
+Building this project involved working through several challenges common to distributed and collaborative applications:
+
+- Designing an offline-capable editing workflow
+- Understanding CRDT-based conflict resolution
+- Persisting collaborative state locally
+- Synchronizing state across multiple replicas
+- Handling network interruptions and retries
+- Designing document-level authorization
+- Protecting synchronization endpoints
+- Testing distributed state convergence
+- Deploying a full-stack application with automated CI
+
+The project provided practical experience with architectural trade-offs that go beyond traditional CRUD-based web applications.
 
 ---
 
 ## Author
 
-**Heyzii** — Full Stack MERN Developer
-GitHub: https://github.com/hejazi-zarkawi
-LinkedIn: _add your LinkedIn URL_
+**Mohammad Umar Al Hejazi**
+
+Software Developer
+
+**GitHub:** [https://github.com/hejazi-zarkawi/]
+
+**LinkedIn:** [https://www.linkedin.com/in/mohammad-umar-al-hejazi/]
