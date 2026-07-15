@@ -2,6 +2,8 @@
 
 A production-oriented collaborative document editor designed around **local-first principles**. Users can continue editing documents while offline, persist changes locally, automatically synchronize when connectivity returns, and safely reconcile concurrent edits using conflict-free replicated data types (CRDTs).
 
+**Built for the House of Edtech Fullstack Developer Assignment 2 (v2.1, April 2026).**
+
 **Live Application:** [https://local-first-doc-editor-seven.vercel.app/]
 
 **Repository:** [https://github.com/hejazi-zarkawi/local-first-doc-editor/]
